@@ -583,7 +583,7 @@ void initMQTT() {
     return;
   }
   
-  mqttClient.setServer(mqtt_server.c_str(), 1883); // Используем стандартный порт 1883
+  mqttClient.setServer(mqtt_server.c_str(), 1883); // Используем стандартный порт 1883 
   connectToMQTT();
 }
 void connectToMQTT() {
