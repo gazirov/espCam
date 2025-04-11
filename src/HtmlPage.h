@@ -4,3 +4,4 @@
 
 void handleRoot(AsyncWebServerRequest *request);
 void handleSaveConfig(AsyncWebServerRequest *request);
+void handleVideoPage(AsyncWebServerRequest *request);

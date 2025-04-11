@@ -11,7 +11,14 @@ struct AppSettings {
   String mqtt_server;
   String mqtt_topic;
   int interval_min;
-
+  String seafile_host;
+  String seafile_user;
+  String seafile_pass;
+  String seafile_token;
+  String seafile_repo_id;
+  //String smb_server;
+  //String smb_username;
+  //String smb_password;
   // Camera
   int frameSize;
   int jpegQuality;
@@ -23,6 +30,7 @@ struct AppSettings {
   int contrast;
   int saturation;
   int sharpness;
+
 };
 
 extern AppSettings settings;
