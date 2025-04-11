@@ -18,45 +18,12 @@
 #include <HTTPClient.h> // Для отправки HTTP-запросов
 #include <WiFiClientSecure.h> // Для HTTPS соединения
 #include <PubSubClient.h> //mqtt
+#include "CameraConfig.h"
+#include "SettingsManager.h"
+#include "HtmlPage.h"
 
 
-
-// Параметры подключения камеры
-#define PWDN_GPIO_NUM     -1
-#define RESET_GPIO_NUM    15
-#define XCLK_GPIO_NUM     27
-#define SIOD_GPIO_NUM     25
-#define SIOC_GPIO_NUM     23
-#define D0_GPIO_NUM       32
-#define D1_GPIO_NUM       35
-#define D2_GPIO_NUM       34
-#define D3_GPIO_NUM        5
-#define D4_GPIO_NUM       39
-#define D5_GPIO_NUM       18
-#define D6_GPIO_NUM       36
-#define D7_GPIO_NUM       19
-#define VSYNC_GPIO_NUM    22
-#define HREF_GPIO_NUM     26
-#define PCLK_GPIO_NUM     21
-
-// Определение CAM_PIN_
-#define CAM_PIN_PWDN    PWDN_GPIO_NUM
-#define CAM_PIN_RESET   RESET_GPIO_NUM
-#define CAM_PIN_XCLK    XCLK_GPIO_NUM
-#define CAM_PIN_SIOD    SIOD_GPIO_NUM
-#define CAM_PIN_SIOC    SIOC_GPIO_NUM
-#define CAM_PIN_D0      D0_GPIO_NUM
-#define CAM_PIN_D1      D1_GPIO_NUM
-#define CAM_PIN_D2      D2_GPIO_NUM
-#define CAM_PIN_D3      D3_GPIO_NUM
-#define CAM_PIN_D4      D4_GPIO_NUM
-#define CAM_PIN_D5      D5_GPIO_NUM
-#define CAM_PIN_D6      D6_GPIO_NUM
-#define CAM_PIN_D7      D7_GPIO_NUM
-#define CAM_PIN_VSYNC   VSYNC_GPIO_NUM
-#define CAM_PIN_HREF    HREF_GPIO_NUM
-#define CAM_PIN_PCLK    PCLK_GPIO_NUM
-
+// Параметры для измерения напряжения батареи
 #define BASE_VOLATAGE     3600
 #define SCALE             0.661
 #define ADC_FILTER_SAMPLE 64
@@ -96,28 +63,16 @@ RTC_PCF8563 rtc;
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
+//SMB
+
 // Объекты для HTTPS соединения
 WiFiClientSecure client;
 int operationMode = 0;
-// Переменные для хранения настроек
-String ssid = "";
-String password = "";
-int savedOperationMode = 1; // Значение по умолчанию
-int chanelMode = 1;
-String tg_token = "";
-String tg_chatId = "";
-String mqtt_server = "";
-String mqtt_topic = "";
-String smb_server = "";
-String smb_username = "";
-String smb_password = "";
-int interval_min = 0;
 
 // Файл для сохранения настроек
-const char* settingsPath = "/settings.json";
+//const char* settingsPath = "/settings.json";
 
 // Прототипы функций
-void initCamera();
 void initWiFi();
 void initWebServer();
 void initTime();
@@ -128,10 +83,6 @@ float readBatteryVoltage();
 String getFileNameWithBatteryLevel();
 void setupLED();
 void ledIndicator(int mode);
-bool loadSettings();
-bool saveSettings();
-void handleRoot(AsyncWebServerRequest *request);
-void handleSaveConfig(AsyncWebServerRequest *request);
 void sendToTelegram(camera_fb_t *fb, const String& fileName);
 void handle_jpg_stream(AsyncWebServerRequest *request); // Добавлено для потоковой передачи
 void connectToMQTT();
@@ -141,14 +92,20 @@ void publishToMQTT(camera_fb_t *fb);
 void setup() {
   Serial.begin(115200);
   delay(1000);
-/*
-  pinMode(WAKEUP_PIN, INPUT_PULLUP);
-  digitalWrite(WAKEUP_PIN, HIGH);
 
-  int pinState = digitalRead(WAKEUP_PIN);
-  Serial.print("Начальное состояние WAKEUP_PIN: ");
-  Serial.println(pinState == HIGH ? "HIGH" : "LOW");
-*/
+  if (!psramFound()) {
+    Serial.println("PSRAM не найдена!");
+  } else {
+    Serial.printf("PSRAM найдена: %u байт\n", ESP.getFreePsram());
+  }
+
+  // Инициализация файловой системы
+  if (!SPIFFS.begin(true)) {
+    Serial.println("Ошибка монтирования SPIFFS");
+    return;
+  }
+  
+  loadSettings();
   // Инициализируем RTC GPIO для WAKEUP_PIN
   rtc_gpio_init(WAKEUP_PIN);
   rtc_gpio_set_direction(WAKEUP_PIN, RTC_GPIO_MODE_INPUT_ONLY);
@@ -164,11 +121,26 @@ void setup() {
   digitalWrite(POWER_HOLD_PIN, HIGH);
 
 
-  // Инициализация файловой системы
-  if (!SPIFFS.begin(true)) {
-    Serial.println("Ошибка монтирования SPIFFS");
-    return;
+  initWiFi();
+
+
+  CameraSettings camSettings;
+  camSettings.frameSize = (framesize_t)settings.frameSize;
+  camSettings.jpegQuality = settings.jpegQuality;
+  camSettings.fbCount = settings.fbCount;
+  camSettings.vflip = settings.vflip;
+  camSettings.hmirror = settings.hmirror;
+  camSettings.denoise = settings.denoise;
+  camSettings.brightness = settings.brightness;
+  camSettings.contrast = settings.contrast;
+  camSettings.saturation = settings.saturation;
+  camSettings.sharpness = settings.sharpness;
+ 
+  if (!initCamera(camSettings)) {
+    Serial.println("Ошибка инициализации камеры");
+    while (true) delay(1000);
   }
+
 
   // Проверяем причину пробуждения
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
@@ -180,23 +152,18 @@ void setup() {
     Serial.println("Проснулся по неизвестной причине");
   }
 
-
-  // Загрузка настроек
-  if (!loadSettings()) {
-    Serial.println("Не удалось загрузить настройки, используем значения по умолчанию");
-  }
-
-  initCamera();
+  
+  
+  //initCamera(camSettings);
   setupLED();
-  initWiFi();
   initWebServer();
   initTime();
 
-  operationMode = savedOperationMode;
+  operationMode = settings.savedOperationMode;
   // if not connect, going to stream mode
   if (WiFi.status() == WL_CONNECTED){
     // Условная инициализация MQTT
-    if (chanelMode == 2 && operationMode == 2) {
+    if (settings.chanelMode == 2 && operationMode == 2) {
       Serial.println("Инициализация MQTT...");
       initMQTT();
     }
@@ -204,7 +171,7 @@ void setup() {
       // Режим интервальной отправки
       ledIndicator(2);
       captureAndSend();
-      enterDeepSleep(interval_min * 60); // Переходим в сон на заданный интервал
+      enterDeepSleep(settings.interval_min * 60); // Переходим в сон на заданный интервал
     }
   }
   //переход в стрим режим если не подключилось к вайфаю 
@@ -221,12 +188,13 @@ void setup() {
   }
 }
 
+
 void loop() {
   // В остальных режимах действия в loop() не требуются
 int currentMode = operationMode;
 
   // Обработка MQTT-подключения и сообщений только в режиме интервальной отправки
-  if (currentMode == 2 && chanelMode == 2) {
+  if (currentMode == 2 && settings.chanelMode == 2) {
     // Если потоковая трансляция и используем MQTT
     if (!mqttClient.connected()) {
       connectToMQTT();
@@ -238,97 +206,26 @@ ledIndicator(currentMode);
  delay(10);
 }
 
-// Функции инициализации камеры
-void initCamera() {
-  // Настройка конфигурации камеры
-  camera_config_t camera_config = {
-    .pin_pwdn     = CAM_PIN_PWDN,
-    .pin_reset    = CAM_PIN_RESET,
-    .pin_xclk     = CAM_PIN_XCLK,
-    .pin_sscb_sda = CAM_PIN_SIOD,
-    .pin_sscb_scl = CAM_PIN_SIOC,
-    .pin_d7       = CAM_PIN_D7,
-    .pin_d6       = CAM_PIN_D6,
-    .pin_d5       = CAM_PIN_D5,
-    .pin_d4       = CAM_PIN_D4,
-    .pin_d3       = CAM_PIN_D3,
-    .pin_d2       = CAM_PIN_D2,
-    .pin_d1       = CAM_PIN_D1,
-    .pin_d0       = CAM_PIN_D0,
-    .pin_vsync    = CAM_PIN_VSYNC,
-    .pin_href     = CAM_PIN_HREF,
-    .pin_pclk     = CAM_PIN_PCLK,
-
-    // XCLK 20MHz or 10MHz for OV2640 double FPS (Experimental)
-    .xclk_freq_hz = 10000000,
-    .ledc_timer   = LEDC_TIMER_0,
-    .ledc_channel = LEDC_CHANNEL_0,
-
-    .pixel_format = PIXFORMAT_JPEG, // YUV422, GRAYSCALE, RGB565, JPEG
-    .frame_size   = FRAMESIZE_VGA, //FRAMESIZE_XGA,  // QQVGA-UXGA Do not use sizes above QVGA when not JPEG
-
-    .jpeg_quality = 14, // 0-63 lower number means higher quality
-    .fb_count     = 3,  // if more than one, i2s runs in continuous mode. Use only with JPEG
-    .grab_mode    = CAMERA_GRAB_LATEST //CAMERA_GRAB_WHEN_EMPTY,
-  };
-
-  Serial.println("Инициализация камеры...");
-
-  // Инициализация камеры
-  esp_err_t err = esp_camera_init(&camera_config);
-  if (err != ESP_OK) {
-    Serial.printf("Ошибка инициализации камеры: %s\n", esp_err_to_name(err));
-    // Обработайте ошибку инициализации
-    while (true) {
-      delay(1000); // Задержка, чтобы не перегружать цикл
-    }
-  } else {
-    Serial.println("Камера успешно инициализирована");
-  }
-
-  // Получение информации о сенсоре камеры
-  sensor_t * s = esp_camera_sensor_get();
-  //s->set_hmirror(s, 1);
-  s->set_vflip(s, 1);
-  
-  s->set_exposure_ctrl(s, 1);
-  s->set_aec2(s, 1);
-  s->set_ae_level(s, 0); 
- // s->set_auto_gain_ctrl(s, 1);
- // s->set_gainceiling(s, (gainceiling_t)6);
-  s->set_awb_gain(s, 1);
-  s->set_whitebal(s, 1);
-  s->set_contrast(s, 1);
-  s->set_brightness(s, 0);
-  s->set_saturation(s, 0);
-  s->set_sharpness(s, 2);
-  s->set_denoise(s, 1);    
-
-  if (s != nullptr) {
-    Serial.printf("Модель сенсора камеры: %s\n", (s->id.PID == OV3660_PID) ? "OV3660" :
-                                                (s->id.PID == OV2640_PID) ? "OV2640" :
-                                                (s->id.PID == OV7725_PID) ? "OV7725" :
-                                                "Неизвестная");
-  } else {
-    Serial.println("Ошибка получения информации о сенсоре камеры");
-  }
-}
-
-
 // Функция инициализации Wi-Fi
 void initWiFi() {
   WiFi.disconnect(true);
   delay(100);
 
-  if (ssid != "") {
+  if (settings.ssid != "") {
     // Пытаемся подключиться к сохраненной сети
-    WiFi.begin(ssid.c_str(), password.c_str());
+    WiFi.begin(settings.ssid.c_str(), settings.password.c_str());
 
     unsigned long startAttemptTime = millis();
-
+    Serial.println("WIFI подключемся\n" );
+    Serial.println(settings.ssid.c_str());
+    Serial.println(settings.password.c_str());
     // Ждем подключения или истечения таймаута
     while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 20000) {
       delay(100);
+      if (WiFi.status() == WL_CONNECT_FAILED) {
+        Serial.println("Неверный пароль или ошибка подключения");
+        break;
+    }
       Serial.print(".");
     }
   }
@@ -354,206 +251,10 @@ void initWebServer() {
   // Обработка сохранения настроек
   server.on("/saveConfig", HTTP_POST, handleSaveConfig);
 
+  server.on("/video", HTTP_GET, handleVideoPage);
+
   // Начало работы сервера конфигурации
   server.begin();
-}
-
-// Функции обработки запросов веб-сервера
-
-void handleRoot(AsyncWebServerRequest *request) {
-String html = "<!DOCTYPE html><html lang='en'><head>";
-html += "<meta charset='UTF-8'>";
-html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
-html += "<title>Config ESP32</title>";
-html += "<style>";
-html += "body { font-family: Arial, sans-serif; margin: 40px; }";
-html += "h1 { text-align: center; color: #333; }";
-html += "form { max-width: 600px; margin: auto; background: #f9f9f9; padding: 20px; border-radius: 10px; box-shadow: 0 0 10px rgba(0, 0, 0, 0.1); }";
-html += "fieldset { border: 1px solid #ccc; padding: 20px; margin-bottom: 20px; border-radius: 5px; }";
-html += "legend { font-weight: bold; color: #333; }";
-html += "label { display: block; margin: 10px 0 5px; }";
-html += "input[type='text'], input[type='password'], input[type='number'], select { width: 100%; padding: 10px; margin: 5px 0 20px 0; border: 1px solid #ccc; border-radius: 5px; }";
-html += "input[type='submit'] { background-color: #4CAF50; color: white; padding: 15px 20px; border: none; border-radius: 5px; cursor: pointer; }";
-html += "input[type='submit']:hover { background-color: #45a049; }";
-html += "</style>";
-html += "</head><body>";
-html += "<h1>Config Wi-Fi and work mode</h1>";
-html += "<form action='/saveConfig' method='POST'>";
-
-html += "<fieldset>";
-html += "<legend>Wi-Fi Settings</legend>";
-html += "<label for='ssid'>SSID:</label><input type='text' id='ssid' name='ssid' value='" + ssid + "'>";
-html += "<label for='password'>Password:</label><input type='password' id='password' name='password' value='" + password + "'>";
-html += "</fieldset>";
-
-html += "<fieldset>";
-html += "<legend>Work Mode Settings</legend>";
-html += "<label for='mode'>Work mode:</label>";
-html += "<select name='mode' id='mode'>";
-html += "<option value='1'" + String(savedOperationMode == 1 ? " selected" : "") + ">Stream mode</option>";
-html += "<option value='2'" + String(savedOperationMode == 2 ? " selected" : "") + ">Interval</option>";
-html += "</select>";
-html += "<label for='chanel'>Channel:</label>";
-html += "<select name='chanel' id='chanel'>";
-html += "<option value='1'" + String(chanelMode == 1 ? " selected" : "") + ">Telegram</option>";
-html += "<option value='2'" + String(chanelMode == 2 ? " selected" : "") + ">MQTT</option>";
-html += "<option value='3'" + String(chanelMode == 3 ? " selected" : "") + ">SMB</option>";
-html += "</select>";
-html += "<legend>Interval Settings</legend>";
-html += "<label for='interval_min'>Interval (min):</label><input type='number' id='interval_min' name='interval_min' value='" + String(interval_min) + "'>";
-html += "</fieldset>";
-
-
-html += "<fieldset>";
-html += "<legend>Telegram Settings</legend>";
-html += "<label for='tg_token'>Telegram token:</label><input type='text' id='tg_token' name='tg_token' value='" + String(tg_token) + "'>";
-html += "<label for='tg_chatId'>Telegram Chat ID:</label><input type='text' id='tg_chatId' name='tg_chatId' value='" + String(tg_chatId) + "'>";
-html += "</fieldset>";
-
-html += "<fieldset>";
-html += "<legend>MQTT Settings</legend>";
-html += "<label for='mqtt_server'>MQTT server:</label><input type='text' id='mqtt_server' name='mqtt_server' value='" + String(mqtt_server) + "'>";
-html += "<label for='mqtt_topic'>MQTT topic:</label><input type='text' id='mqtt_topic' name='mqtt_topic' value='" + String(mqtt_topic) + "'>";
-html += "</fieldset>";
-
-html += "<fieldset>";
-html += "<legend>SMB Settings NOT Realized</legend>";
-html += "<label for='smb_server'>SMB server:</label><input type='text' id='smb_server' name='smb_server' value='" + String(smb_server) + "'>";
-html += "<label for='smb_username'>SMB username:</label><input type='text' id='smb_username' name='smb_username' value='" + String(smb_username) + "'>";
-html += "<label for='smb_password'>SMB password:</label><input type='password' id='smb_password' name='smb_password' value='" + String(smb_password) + "'>";
-html += "</fieldset>";
-
-html += "<input type='submit' value='Save'>";
-html += "</form>";
-html += "</body></html>";
-request->send(200, "text/html", html);
-}
-
-void handleSaveConfig(AsyncWebServerRequest *request) {
-  bool hasChanged = false;
-  if (request->hasParam("ssid", true)) {
-    ssid = request->getParam("ssid", true)->value();
-    hasChanged = true;
-  }
-  if (request->hasParam("password", true)) {
-    password = request->getParam("password", true)->value();
-    hasChanged = true;
-  }
-  if (request->hasParam("mode", true)) {
-    savedOperationMode = request->getParam("mode", true)->value().toInt();
-    hasChanged = true;
-  }
-  if (request->hasParam("chanel", true)) {
-    chanelMode = request->getParam("chanel", true)->value().toInt();
-    hasChanged = true;
-  }
-  if (request->hasParam("tg_token", true)) {
-    tg_token = request->getParam("tg_token", true)->value();
-    hasChanged = true;
-  }
-  if (request->hasParam("tg_chatId", true)) {
-    tg_chatId = request->getParam("tg_chatId", true)->value();
-    hasChanged = true;
-  }
-  if (request->hasParam("interval_min", true)) {
-    interval_min = request->getParam("interval_min", true)->value().toInt();
-    hasChanged = true;
-  }
-    if (request->hasParam("mqtt_server", true)) {
-    mqtt_server = request->getParam("mqtt_server", true)->value();
-    hasChanged = true;
-  }
-    if (request->hasParam("mqtt_topic", true)) {
-    mqtt_topic = request->getParam("mqtt_topic", true)->value();
-    hasChanged = true;
-  }
-
-  // save settings
-  if (hasChanged && saveSettings()) {
-    request->send(200, "text/plain", "Setting saved. Reloading...");
-    delay(1000);
-    ESP.restart();
-  } else {
-    request->send(500, "text/plain", "Failed to save settings. Please try again.");
-  }
-}
-
-// Функция загрузки настроек из SPIFFS
-bool loadSettings() {
-  if (!SPIFFS.exists(settingsPath)) {
-    Serial.println("Файл настроек не найден");
-    return false;
-  }
-
-  File file = SPIFFS.open(settingsPath, "r");
-  if (!file) {
-    Serial.println("Не удалось открыть файл настроек для чтения");
-    return false;
-  }
-
-  size_t size = file.size();
-  if (size > 2048) {
-    Serial.println("Файл настроек слишком большой");
-    file.close();
-    return false;
-  }
-
-  // Чтение файла в буфер
-  std::unique_ptr<char[]> buf(new char[size + 1]);
-  file.readBytes(buf.get(), size);
-  file.close();
-
-  // Разбор JSON
-  StaticJsonDocument<1024> json;
-  auto error = deserializeJson(json, buf.get());
-  if (error) {
-    Serial.println("Ошибка разбора файла настроек");
-    return false;
-  }
-
-  // Получение значений
-  ssid = json["ssid"].as<String>();
-  password = json["password"].as<String>();
-  savedOperationMode = json["mode"].as<int>();
-  chanelMode = json["chanel"].as<int>();
-  tg_token = json["tg_token"].as<String>();
-  tg_chatId = json["tg_chatId"].as<String>();
-  interval_min = json["interval_min"].as<int>();
-  mqtt_server = json["mqtt_server"].as<String>();
-  mqtt_topic = json["mqtt_topic"].as<String>();
-
-  Serial.println("Настройки загружены");
-  return true;
-}
-
-// Функция сохранения настроек в SPIFFS
-bool saveSettings() {
-  StaticJsonDocument<1024> json;
-  json["ssid"] = ssid;
-  json["password"] = password;
-  json["mode"] = savedOperationMode;
-  json["chanel"] = chanelMode;
-  json["tg_token"] = tg_token;
-  json["tg_chatId"] = tg_chatId;
-  json["interval_min"] = interval_min;
-  json["mqtt_server"] = mqtt_server;
-  json["mqtt_topic"] = mqtt_topic;
-
-  File file = SPIFFS.open(settingsPath, "w");
-  if (!file) {
-    Serial.println("Ошибка открытия файла настроек для записи");
-    return false;
-  }
-
-  if (serializeJson(json, file) == 0) {
-    Serial.println("Ошибка записи настроек в файл");
-    file.close();
-    return false;
-  }
-
-  file.close();
-  Serial.println("Настройки сохранены");
-  return true;
 }
 
 // Функция инициализации времени через NTP и RTC
@@ -578,22 +279,26 @@ void initTime() {
 }
 
 void initMQTT() {
-  if (mqtt_server == "") {
+  if (settings.mqtt_server == "") {
     Serial.println("MQTT сервер не настроен");
     return;
   }
   
-  mqttClient.setServer(mqtt_server.c_str(), 1883); // Используем стандартный порт 1883 
+  mqttClient.setServer(settings.mqtt_server.c_str(), 1883); // Используем стандартный порт 1883 
   connectToMQTT();
 }
 void connectToMQTT() {
-  const int maxAttempts = 15;
+  const int maxAttempts = 5;
   int attempt = 0;
 
   while (!mqttClient.connected() && attempt < maxAttempts) {
     Serial.print("Подключаемся к MQTT-брокеру... (Попытка ");
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("Wi-Fi не подключён, пропуск MQTT");
+     // break;
+    }
     Serial.print(attempt + 1);
-    Serial.println(" из 15)");
+    Serial.println(" из 5)");
 
     String clientId = "ESP32Cam_" + String(random(0xffff), HEX);
 
@@ -647,9 +352,17 @@ void handle_jpg_stream(AsyncWebServerRequest *request) {
     [](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
       size_t len = 0;
 
-      if(fb == NULL) {
+ 
+      if (fb == NULL) {
+          int64_t now = esp_timer_get_time();
+          if (now - last_frame < 1000000 / 15) { // Ограничение до 15 FPS
+              return 0; // Пропускаем кадр
+          }
+        
+
         // Получаем новый кадр
         fb = esp_camera_fb_get();
+        last_frame = now;
         if (!fb) {
           Serial.println("Ошибка захвата кадра");
           return 0;
@@ -730,15 +443,15 @@ void captureAndSend() {
   Serial.printf("Имя файла: %s\n", fileName.c_str());
 
   // Отправка файла в соответствии с выбранным каналом
-  if (chanelMode == 1) {
+  if (settings.chanelMode == 1) {
     Serial.println("Отправка изображения в Telegram...");
     // Отправка в Telegram-бот
     sendToTelegram(fb, fileName);
-  } else if (chanelMode == 2) {
+  } else if (settings.chanelMode == 2) {
     Serial.println("Отправка изображения в MQTT...");
     // Отправка в MQTT
      publishToMQTT(fb);
-  } else if (chanelMode == 3) {
+  } else if (settings.chanelMode == 3) {
     Serial.println("Отправка изображения по Samba...");
     // Отправка по Samba
     // sendToSamba(fb, fileName);
@@ -754,7 +467,7 @@ void captureAndSend() {
 
 // Функция отправки изображения в Telegram
 void sendToTelegram(camera_fb_t *fb, const String& fileName) {
-  if (tg_token == "" || tg_chatId == "") {
+  if (settings.tg_token == "" || settings.tg_chatId == "") {
     Serial.println("Токен бота или ID чата не указаны");
     return;
   }
@@ -772,7 +485,7 @@ void sendToTelegram(camera_fb_t *fb, const String& fileName) {
   String dataStart = "";
   dataStart += "--" + boundary + "\r\n";
   dataStart += "Content-Disposition: form-data; name=\"chat_id\"\r\n\r\n";
-  dataStart += tg_chatId + "\r\n";
+  dataStart += settings.tg_chatId + "\r\n";
 
   // Добавляем поле caption с именем файла
   dataStart += "--" + boundary + "\r\n";
@@ -790,7 +503,7 @@ void sendToTelegram(camera_fb_t *fb, const String& fileName) {
 
   // Формируем заголовки HTTP-запроса
   String requestHeader = "";
-  requestHeader += "POST /bot" + tg_token + "/sendPhoto HTTP/1.1\r\n";
+  requestHeader += "POST /bot" + settings.tg_token + "/sendPhoto HTTP/1.1\r\n";
   requestHeader += "Host: api.telegram.org\r\n";
   requestHeader += "Content-Type: multipart/form-data; boundary=" + boundary + "\r\n";
   requestHeader += "Content-Length: " + String(contentLength) + "\r\n";
@@ -862,6 +575,8 @@ void enterDeepSleep(uint64_t sleepTimeS) {
 
   Serial.println("Уходим в глубокий сон...");
 
+  WiFi.disconnect(true); // Отключаем Wi-Fi полностью
+  WiFi.mode(WIFI_OFF);     // Останавливаем Wi-Fi модуль
   // Отключаем питание камеры для экономии энергии
   esp_camera_deinit();
 
@@ -933,7 +648,7 @@ void ledIndicator(int mode) {
 // }
 
 void publishToMQTT(camera_fb_t *fb) {
-  if (mqtt_server == "" || mqtt_topic == "") {
+  if (settings.mqtt_server == "" || settings.mqtt_topic == "") {
     Serial.println("MQTT сервер или топик не настроены");
     return;
   }
@@ -968,7 +683,7 @@ void publishToMQTT(camera_fb_t *fb) {
   encodedImage[outputLen] = '\0';
 
   // Отправляем закодированное изображение по MQTT
-  bool success = mqttClient.publish(mqtt_topic.c_str(), (char*)encodedImage);
+  bool success = mqttClient.publish(settings.mqtt_topic.c_str(), (char*)encodedImage);
 
   if (success) {
     Serial.println("Изображение успешно отправлено по MQTT");

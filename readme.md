@@ -70,14 +70,15 @@ DNSServer.h, HTTPClient.h, WiFiClientSecure.h и другие используе
 
 Камера OV3660:
 <details>
-<summary>hardware</summary>
-• SCCB Clock: IO23
-• SCCB Data: IO25
-• System Clock: IO27
-• VSYNC: IO22
-• HREF: IO26
-• PCLK: IO21
-• Pixel Data Bits:
+<summary>###Hardware</summary>
+SCCB Clock: IO23
+SCCB Data: IO25
+System Clock: IO27
+VSYNC: IO22
+HREF: IO26
+PCLK: IO21
+
+Pixel Data Bits:
 – D0: IO32
 – D1: IO35
 – D2: IO34
@@ -86,24 +87,28 @@ DNSServer.h, HTTPClient.h, WiFiClientSecure.h и другие используе
 – D5: IO18
 – D6: IO36
 – D7: IO19
-• Camera Reset: IO15
-• Camera PWDN: не используется (-1)
+
+Camera Reset: IO15
+Camera PWDN: не используется (-1)
 
 RTC BM8563:
-• SDA: G12
-• SCL: G14
+ SDA: G12
+ SCL: G14
 
 Светодиод:
-• G2
+ G2
 
 Батарея:
-• BAT_ADC_Pin: G38
-• BAT_HOLD_Pin: G33
-</details>
+ BAT_ADC_Pin: G38
+ BAT_HOLD_Pin: G33
+
 Пробуждение по кнопке:
-• Кнопка подключена к контакту G37 (дополнительно настроено через RTC GPIO)
+Кнопка подключена к контакту G37 (дополнительно настроено через RTC GPIO)
 
 Убедитесь, что схема подключения соответствует указанной раскладке пинов.
+
+</details>
+
 
 ## Сборка и установка через Visual Studio Code
 Установите Visual Studio Code и необходимые расширения для работы с Arduino или PlatformIO.
