@@ -129,23 +129,23 @@ void handleRoot(AsyncWebServerRequest *request) {
   html += "<summary><strong>Seafile settings</strong></summary>";
   html += "<fieldset style='margin-top: 10px;'>";
   html += "<label>Host:<br>";
-  html += "<input type='text' name='seafile_host'>";
+  html += "<input type='text' name='seafile_host' value='" + String(settings.seafile_host) + "'>";
   html += "</label><br><br>";
 
   html += "<label>login:<br>";
-  html += "<input type='text' name='seafile_user'>";
+  html += "<input type='text' name='seafile_user' value='" + String(settings.seafile_user) + "'>";
   html += "</label><br><br>";
 
   html += "<label>password:<br>";
-  html += "<input type='password' name='seafile_pass'>";
+  html += "<input type='password' name='seafile_pass' value='" + String(settings.seafile_pass) + "'>";
   html += "</label><br><br>";
 
   html += "<label>token:<br>";
-  html += "<input type='text' name='seafile_token'>";
+  html += "<input type='text' name='seafile_token' value='" + String(settings.seafile_token) + "'>";
   html += "</label><br><br>";
 
   html += "<label>Repo ID:<br>";
-  html += "<input type='text' name='seafile_repo_id'>";
+  html += "<input type='text' name='seafile_repo_id' value='" + String(settings.seafile_repo_id) + "'>";
   html += "</label>";
   html += "</fieldset>";
   html += "</details>";

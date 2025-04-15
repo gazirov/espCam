@@ -21,6 +21,10 @@
 #include "CameraConfig.h"
 #include "SettingsManager.h"
 #include "HtmlPage.h"
+#include "Utils.h"
+#include "MQTTClient.h"
+#include "TelegramSender.h"
+#include "SeafileUploader.h"
 
 
 // Параметры для измерения напряжения батареи
@@ -59,18 +63,13 @@ AsyncWebServer server(80); // Основной веб-сервер для кон
 AsyncWebServer streamServer(81); // Сервер для потокового вещания на порту 81
 
 RTC_PCF8563 rtc;
-//mqtt
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
-
-//SMB
 
 // Объекты для HTTPS соединения
 WiFiClientSecure client;
 int operationMode = 0;
 
-// Файл для сохранения настроек
-//const char* settingsPath = "/settings.json";
 
 // Прототипы функций
 void initWiFi();
@@ -79,17 +78,8 @@ void initTime();
 void startCameraServer();
 void captureAndSend();
 void enterDeepSleep(uint64_t sleepTimeS);
-float readBatteryVoltage();
-String getFileNameWithBatteryLevel();
-void setupLED();
-void ledIndicator(int mode);
-void sendToTelegram(camera_fb_t *fb, const String& fileName);
+//String getFileNameWithBatteryLevel();
 void handle_jpg_stream(AsyncWebServerRequest *request); // Добавлено для потоковой передачи
-void connectToMQTT();
-void initMQTT();
-void publishToMQTT(camera_fb_t *fb);
-bool  fetchSeafileToken();
-void sendToSeafile(camera_fb_t *fb, const String& fileName);
 
 void setup() {
   Serial.begin(115200);
@@ -109,10 +99,6 @@ void setup() {
   
   loadSettings();
 
-  if (settings.seafile_token == "") {
-    Serial.println("Seafile токен пустой, пробуем получить...");
-    fetchSeafileToken();
-  }
   // Инициализируем RTC GPIO для WAKEUP_PIN
   rtc_gpio_init(WAKEUP_PIN);
   rtc_gpio_set_direction(WAKEUP_PIN, RTC_GPIO_MODE_INPUT_ONLY);
@@ -127,9 +113,7 @@ void setup() {
   pinMode(POWER_HOLD_PIN, OUTPUT);
   digitalWrite(POWER_HOLD_PIN, HIGH);
 
-
   initWiFi();
-
 
   CameraSettings camSettings;
   camSettings.frameSize = (framesize_t)settings.frameSize;
@@ -148,7 +132,6 @@ void setup() {
     while (true) delay(1000);
   }
 
-
   // Проверяем причину пробуждения
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
   if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT0) {
@@ -158,21 +141,24 @@ void setup() {
   } else {
     Serial.println("Проснулся по неизвестной причине");
   }
-
   
-  
-  //initCamera(camSettings);
   setupLED();
   initWebServer();
   initTime();
-
+/*
+  if (settings.seafile_token.isEmpty() && !settings.seafile_user.isEmpty() && !settings.seafile_host.isEmpty() && !settings.seafile_pass.isEmpty() && settings.chanelMode == 3) {
+    Serial.println(settings.seafile_user);
+    Serial.println("Seafile токен пустой, пробуем получить...");
+    fetchSeafileToken();
+  }
+*/
   operationMode = settings.savedOperationMode;
   // if not connect, going to stream mode
   if (WiFi.status() == WL_CONNECTED){
     // Условная инициализация MQTT
     if (settings.chanelMode == 2 && operationMode == 2) {
       Serial.println("Инициализация MQTT...");
-      initMQTT();
+      initMQTT(mqttClient);
     }
     else if (operationMode == 2) {
       // Режим интервальной отправки
@@ -204,7 +190,7 @@ int currentMode = operationMode;
   if (currentMode == 2 && settings.chanelMode == 2) {
     // Если потоковая трансляция и используем MQTT
     if (!mqttClient.connected()) {
-      connectToMQTT();
+      connectToMQTT(mqttClient);
     }
     mqttClient.loop();
   }
@@ -224,22 +210,22 @@ void initWiFi() {
 
     unsigned long startAttemptTime = millis();
     Serial.println("WIFI подключемся\n" );
-   // Serial.println(settings.ssid.c_str());
-   // Serial.println(settings.password.c_str());
-    // Ждем подключения или истечения таймаута
+   // Ждем подключения или истечения таймаута
     while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 30000) {
       delay(100);
       if (WiFi.status() == WL_CONNECT_FAILED) {
         Serial.println("Неверный пароль или ошибка подключения");
         break;
-    }
+      }
       Serial.print(".");
     }
   }
 
-  // Если не удалось подключиться, запускаем точку доступа
+  // if not conect, run AP chanel 1
+  // нужно изменить поведение селано случае отладки  
   if (WiFi.status() != WL_CONNECTED) {
     WiFi.softAP(ap_ssid, ap_password);
+    ledIndicator(0);
     Serial.println("\nТочка доступа запущена");
     Serial.print("IP адрес: ");
     Serial.println(WiFi.softAPIP());
@@ -285,50 +271,7 @@ void initTime() {
   }
 }
 
-void initMQTT() {
-  if (settings.mqtt_server == "") {
-    Serial.println("MQTT сервер не настроен");
-    return;
-  }
-  
-  mqttClient.setServer(settings.mqtt_server.c_str(), 1883); // Используем стандартный порт 1883 
-  connectToMQTT();
-}
-void connectToMQTT() {
-  const int maxAttempts = 5;
-  int attempt = 0;
 
-  while (!mqttClient.connected() && attempt < maxAttempts) {
-    Serial.print("Подключаемся к MQTT-брокеру... (Попытка ");
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("Wi-Fi не подключён, пропуск MQTT");
-     // break;
-    }
-    Serial.print(attempt + 1);
-    Serial.println(" из 5)");
-
-    String clientId = "ESP32Cam_" + String(random(0xffff), HEX);
-
-    // Если требуется аутентификация, используйте:
-    // if (mqttClient.connect(clientId.c_str(), mqtt_username, mqtt_password)) {
-    if (mqttClient.connect(clientId.c_str())) {
-      Serial.println(" Подключено к MQTT-брокеру");
-      // Если нужно подписаться на топики, делаем это здесь
-      // mqttClient.subscribe("your/client/topic");
-      break; // Выходим из цикла, поскольку подключение успешно
-    } else {
-      Serial.print("Ошибка подключения, код ошибки = ");
-      Serial.println(mqttClient.state());
-      attempt++;
-      if (attempt < maxAttempts) {
-        Serial.println(" Попробуем снова через 10 секунд");
-        delay(10000);
-      } else {
-        Serial.println(" Достигнуто максимальное количество попыток подключения. Подключение не удалось.");
-      }
-    }
-  }
-}
 
 // Функция запуска сервера потоковой трансляции
 void startCameraServer() {
@@ -457,7 +400,7 @@ void captureAndSend() {
   } else if (settings.chanelMode == 2) {
     Serial.println("Отправка изображения в MQTT...");
     // Отправка в MQTT
-     publishToMQTT(fb);
+     publishToMQTT(mqttClient, fb);
   } else if (settings.chanelMode == 3) {
     Serial.println("Отправка изображения в Seafile...");
     sendToSeafile(fb, fileName);
@@ -470,81 +413,6 @@ void captureAndSend() {
   esp_camera_fb_return(fb);
 
   Serial.println("Снимок обработан");
-}
-
-// Функция отправки изображения в Telegram
-void sendToTelegram(camera_fb_t *fb, const String& fileName) {
-  if (settings.tg_token == "" || settings.tg_chatId == "") {
-    Serial.println("Токен бота или ID чата не указаны");
-    return;
-  }
-
-  WiFiClientSecure client;
-  client.setInsecure(); // Отключаем проверку сертификата
-
-  if (!client.connect("api.telegram.org", 443)) {
-    Serial.println("Ошибка подключения к Telegram API");
-    return;
-  }
-
-  // Объявляем переменные
-  String boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
-  String dataStart = "";
-  dataStart += "--" + boundary + "\r\n";
-  dataStart += "Content-Disposition: form-data; name=\"chat_id\"\r\n\r\n";
-  dataStart += settings.tg_chatId + "\r\n";
-
-  // Добавляем поле caption с именем файла
-  dataStart += "--" + boundary + "\r\n";
-  dataStart += "Content-Disposition: form-data; name=\"caption\"\r\n\r\n";
-  dataStart += fileName + "\r\n";
-
-  dataStart += "--" + boundary + "\r\n";
-  dataStart += "Content-Disposition: form-data; name=\"photo\"; filename=\"image.jpg\"\r\n";
-  dataStart += "Content-Type: image/jpeg\r\n\r\n";
-
-  String dataEnd = "\r\n--" + boundary + "--\r\n";
-
-  // Вычисляем длину тела запроса
-  size_t contentLength = dataStart.length() + fb->len + dataEnd.length();
-
-  // Формируем заголовки HTTP-запроса
-  String requestHeader = "";
-  requestHeader += "POST /bot" + settings.tg_token + "/sendPhoto HTTP/1.1\r\n";
-  requestHeader += "Host: api.telegram.org\r\n";
-  requestHeader += "Content-Type: multipart/form-data; boundary=" + boundary + "\r\n";
-  requestHeader += "Content-Length: " + String(contentLength) + "\r\n";
-  requestHeader += "\r\n"; // Пустая строка разделяет заголовки и тело
-
-  // Отправляем заголовки
-  client.print(requestHeader);
-
-  // Отправляем тело запроса
-  client.print(dataStart);
-
-  // Отправляем данные изображения по частям, чтобы избежать проблем с памятью
-  const size_t bufferSize = 1024;
-  size_t bytesSent = 0;
-  while (bytesSent < fb->len) {
-    size_t chunkSize = min(bufferSize, fb->len - bytesSent);
-    client.write(fb->buf + bytesSent, chunkSize);
-    bytesSent += chunkSize;
-  }
-
-  client.print(dataEnd);
-
-  // Читаем ответ сервера
-  while (client.connected()) {
-    String line = client.readStringUntil('\n');
-    if (line == "\r") {
-      break;
-    }
-  }
-  String response = client.readString();
-  //Serial.println("Ответ сервера Telegram:");
-  //Serial.println(response);
-
-  client.stop(); // Закрываем соединение
 }
 
 
@@ -593,294 +461,5 @@ void enterDeepSleep(uint64_t sleepTimeS) {
 
 
   // Переходим в глубокий сон
- // delay(30000);
   esp_deep_sleep_start();
-}
-
-// Функция чтения напряжения батареи
-float readBatteryVoltage() {
-  uint16_t raw = analogRead(BAT_ADC_PIN);
-  float voltage = ((float)raw / 4095.0) * 3.3 / 0.661; // Учитываем делитель напряжения
- 
-  Serial.println("Напряжение батареи: " + String(voltage));
-
-  return voltage;
-}
-
-// Функция получения имени файла со временем и напряжением батареи
-String getFileNameWithBatteryLevel() {
-  DateTime now = rtc.now();
-  float voltage = readBatteryVoltage();
-  char buf[50];
-  sprintf(buf, "%02d%02d%02d_%02d%02d_%.2fV.jpg",
-          now.day(), now.month(), now.year() % 100,
-          now.hour(), now.minute(),
-          voltage);
-  return String(buf);
-}
-
-// Функции управления светодиодом
-void setupLED() {
-  pinMode(LED_PIN, OUTPUT);
-}
-
-void ledIndicator(int mode) {
-  // mode: 0 - ожидание подключения, 1 - потоковая трансляция, 2 - интервальная отправка
-  switch(mode) {
-    case 0:
-      digitalWrite(LED_PIN, HIGH); // Светодиод горит постоянно
-      break;
-    case 1:
-      // Мигание 2 раза в секунду
-      if (millis() % 500 < 250) {
-        digitalWrite(LED_PIN, HIGH);
-      } else {
-        digitalWrite(LED_PIN, LOW);
-      }
-      break;
-    case 2:
-      // Мигание 4 раза в секунду
-      if (millis() % 250 < 125) {
-        digitalWrite(LED_PIN, HIGH);
-      } else {
-        digitalWrite(LED_PIN, LOW);
-      }
-      break;
-  }
-}
-
-// Дополнительные функции отправки данных
-
-void publishToMQTT(camera_fb_t *fb) {
-  if (settings.mqtt_server == "" || settings.mqtt_topic == "") {
-    Serial.println("MQTT сервер или топик не настроены");
-    return;
-  }
-
-  if (!mqttClient.connected()) {
-    connectToMQTT();
-  }
-
-  mqttClient.loop();
-
-  // Вычисляем необходимый размер для закодированных данных
-  size_t encodedLen = 4 * ((fb->len + 2) / 3);
-
-  // Выделяем память для закодированных данных (+1 для завершающего нуля)
-  unsigned char* encodedImage = (unsigned char*)malloc(encodedLen + 1);
-  if (encodedImage == nullptr) {
-    Serial.println("Ошибка выделения памяти для закодированного изображения");
-    return;
-  }
-
-  size_t outputLen = 0;
-
-  // Кодируем изображения в Base64
-  int ret = mbedtls_base64_encode(encodedImage, encodedLen, &outputLen, fb->buf, fb->len);
-  if (ret != 0) {
-    Serial.printf("Ошибка кодирования изображения в Base64: -0x%04x\n", -ret);
-    free(encodedImage);
-    return;
-  }
-
-  // Добавляем завершающий нуль-терминатор
-  encodedImage[outputLen] = '\0';
-
-  // Отправляем закодированное изображение по MQTT
-  bool success = mqttClient.publish(settings.mqtt_topic.c_str(), (char*)encodedImage);
-
-  if (success) {
-    Serial.println("Изображение успешно отправлено по MQTT");
-  } else {
-    Serial.println("Ошибка отправки изображения по MQTT");
-  }
-
-  // Освобождаем выделенную память
-  free(encodedImage);
-}
-
-//get token seafile
-bool fetchSeafileToken() {
-  if (settings.seafile_host == "" || settings.seafile_user == "" || settings.seafile_pass == "") {
-    Serial.println("Не заданы параметры подключения к Seafile");
-    return false;
-  }
-
-  WiFiClientSecure client;
-  client.setInsecure(); // отключаем проверку сертификата
-
-  HTTPClient http;
-  String url = settings.seafile_host + "/api2/auth-token/";
-  http.begin(client, url);
-  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-
-  String postData = "username=" + settings.seafile_user + "&password=" + settings.seafile_pass;
-
-  int code = http.POST(postData);
-  if (code != 200) {
-    Serial.printf("Ошибка получения токена: %d\n", code);
-    http.end();
-    return false;
-  }
-
-  String response = http.getString();
-  http.end();
-
-  // Пример ответа: {"token": "abc123..."}
-  int start = response.indexOf(":\"") + 2;
-  int end = response.indexOf("\"", start);
-  if (start == -1 || end == -1) {
-    Serial.println("Ошибка парсинга токена");
-    return false;
-  }
-
-  String token = response.substring(start, end);
-  settings.seafile_token = token;
-  saveSettings(); // сохраняем токен
-
-  Serial.println("Seafile токен получен и сохранён");
-  return true;
-}
-
-void sendToSeafile(camera_fb_t *fb, const String& fileName) {
-  if (!fb || fb->len == 0) {
-    Serial.println("[Seafile] Пустой буфер изображения");
-    return;
-  }
-
-  // 1. Разбор URL
-  String hostUrl = settings.seafile_host; 
-  bool useSSL = hostUrl.startsWith("https://");
-  uint16_t port = useSSL ? 443 : 80;
-
-  // Убираем протокол из host
-  String host = hostUrl;
-  host.replace("https://", "");
-  host.replace("http://", "");
-  host.trim();
-
-  // Убираем путь, если есть
-  int slashIndex = host.indexOf('/');
-  if (slashIndex > 0) {
-    host = host.substring(0, slashIndex);
-  }
-
-  Serial.printf("[Seafile] Подключение к %s:%d (SSL: %s)\n", host.c_str(), port, useSSL ? "да" : "нет");
-
-  // 2. Получаем upload link через HTTPClient (однократно)
-  String uploadLinkPath = "/api2/repos/" + settings.seafile_repo_id + "/upload-link/";
-  String uploadLinkUrl = hostUrl + uploadLinkPath;
-
-  HTTPClient http;
-  if (useSSL) {
-    WiFiClientSecure sclient;
-    sclient.setInsecure();
-    http.begin(sclient, uploadLinkUrl);
-  } else {
-    WiFiClient cclient;
-    http.begin(cclient, uploadLinkUrl);
-  }
-
-  http.addHeader("Authorization", "Token " + String(settings.seafile_token));
-  int code = http.GET();
-  if (code != 200) {
-    Serial.printf("[Seafile] Ошибка получения upload link: %d\n", code);
-    http.end();
-    return;
-  }
-
-  String uploadUrl = http.getString();
-  uploadUrl.replace("\"", "");
-  http.end();
-
-  // 3. Парсим путь из uploadUrl
-  String uploadPath;
-  String uploadHost;
-  bool uploadSSL = uploadUrl.startsWith("https://");
-  uint16_t uploadPort = uploadSSL ? 443 : 80;
-
-  if (uploadSSL) {
-    uploadUrl.replace("https://", "");
-  } else {
-    uploadUrl.replace("http://", "");
-  }
-
-  int pathIndex = uploadUrl.indexOf('/');
-  if (pathIndex > 0) {
-    uploadHost = uploadUrl.substring(0, pathIndex);
-    uploadPath = uploadUrl.substring(pathIndex);
-  } else {
-    Serial.println("[Seafile] Неверный upload URL");
-    return;
-  }
-
-  Serial.printf("[Seafile] Отправка на %s:%d%s\n", uploadHost.c_str(), uploadPort, uploadPath.c_str());
-
-  // 4. Подключение
-  WiFiClient *client;
-  WiFiClientSecure secureClient;
-  WiFiClient plainClient;
-
-  if (uploadSSL) {
-    secureClient.setInsecure();
-    client = &secureClient;
-  } else {
-    client = &plainClient;
-  }
-
-  if (!client->connect(uploadHost.c_str(), uploadPort)) {
-    Serial.println("[Seafile] Ошибка подключения к серверу загрузки");
-    return;
-  }
-
-  // 5. Multipart тело
-  String boundary = "----ESP32Boundary";
-  String bodyStart = "--" + boundary + "\r\n";
-  bodyStart += "Content-Disposition: form-data; name=\"parent_dir\"\r\n\r\n";
-  bodyStart += "/\r\n"; 
-  bodyStart += "--" + boundary + "\r\n";
-  bodyStart += "Content-Disposition: form-data; name=\"file\"; filename=\"" + fileName + "\"\r\n";
-  bodyStart += "Content-Type: image/jpeg\r\n\r\n";
-
-  String bodyEnd = "\r\n--" + boundary + "--\r\n";
-
-  size_t contentLength = bodyStart.length() + fb->len + bodyEnd.length();
-
-  // 6. Заголовки
-  String header = "";
-  header += "POST " + uploadPath + " HTTP/1.1\r\n";
-  header += "Host: " + uploadHost + "\r\n";
-  header += "Authorization: Token " + String(settings.seafile_token) + "\r\n";
-  header += "Content-Type: multipart/form-data; boundary=" + boundary + "\r\n";
-  header += "Content-Length: " + String(contentLength) + "\r\n";
-  header += "Connection: close\r\n\r\n";
-
-  // 7. Отправка
-  client->print(header);
-  client->print(bodyStart);
-
-  const size_t chunkSize = 1024;
-  size_t bytesSent = 0;
-  while (bytesSent < fb->len) {
-    size_t len = min(chunkSize, fb->len - bytesSent);
-    client->write(fb->buf + bytesSent, len);
-    bytesSent += len;
-    delay(1);
-  }
-
-  client->print(bodyEnd);
-
-  // 8. Ответ
-  Serial.println("[Seafile] Ожидаем ответ сервера...");
-  while (client->connected()) {
-    String line = client->readStringUntil('\n');
-    Serial.println(line);
-    if (line == "\r") break;
-  }
-
-  String response = client->readString();
-  Serial.println("[Seafile] Тело ответа:");
-  Serial.println(response);
-
-  client->stop();
 }
