@@ -51,12 +51,14 @@ const int   daylightOffset_sec = 0;
 #define LED_PIN 2
 
 // Пины для чтения напряжения батареи
-#define BAT_ADC_PIN 38 // G38
-#define POWER_HOLD_PIN 33 // G33
+//#define BAT_ADC_PIN 38 // G38
+//#define POWER_HOLD_PIN 33 // G33
 
-// Пины для пробуждения по кнопке
-//в документации указан не корректный номер пина
-#define WAKEUP_PIN GPIO_NUM_38 // G38
+// Пин для пробуждения по кнопке
+//в документации указан G37 но при тесте пинов тригерлся G38
+#define WAKEUP_PIN GPIO_NUM_37 // G37
+
+int lastState = -1;
 
 // Глобальные переменные и объекты
 AsyncWebServer server(80); // Основной веб-сервер для конфигурации
@@ -96,25 +98,22 @@ void setup() {
     Serial.println("Ошибка монтирования SPIFFS");
     return;
   }
-  
+  setupLED();
+  //led on initialization
+  delay(10);
+  ledIndicator(2);
+
   loadSettings();
 
-  // Инициализируем RTC GPIO для WAKEUP_PIN
-  rtc_gpio_init(WAKEUP_PIN);
-  rtc_gpio_set_direction(WAKEUP_PIN, RTC_GPIO_MODE_INPUT_ONLY);
-
-  // Отключаем внутренние подтяжки, так как они не работают на этих пинах
-  rtc_gpio_pulldown_dis(WAKEUP_PIN);
-  rtc_gpio_pullup_dis(WAKEUP_PIN);
-  int pinState = rtc_gpio_get_level(WAKEUP_PIN);
+  rtc_gpio_pullup_en(WAKEUP_PIN);
+  int pinState = gpio_get_level(WAKEUP_PIN);
   Serial.printf("Начальное состояние WAKEUP_PIN (GPIO%u): %s\n", WAKEUP_PIN, pinState ? "HIGH" : "LOW");
 
   // Пины для питания батареи
   pinMode(POWER_HOLD_PIN, OUTPUT);
   digitalWrite(POWER_HOLD_PIN, HIGH);
-
+ 
   initWiFi();
-
   CameraSettings camSettings;
   camSettings.frameSize = (framesize_t)settings.frameSize;
   camSettings.jpegQuality = settings.jpegQuality;
@@ -132,6 +131,7 @@ void setup() {
     while (true) delay(1000);
   }
 
+
   // Проверяем причину пробуждения
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
   if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT0) {
@@ -142,16 +142,10 @@ void setup() {
     Serial.println("Проснулся по неизвестной причине");
   }
   
-  setupLED();
   initWebServer();
   initTime();
-/*
-  if (settings.seafile_token.isEmpty() && !settings.seafile_user.isEmpty() && !settings.seafile_host.isEmpty() && !settings.seafile_pass.isEmpty() && settings.chanelMode == 3) {
-    Serial.println(settings.seafile_user);
-    Serial.println("Seafile токен пустой, пробуем получить...");
-    fetchSeafileToken();
-  }
-*/
+ 
+
   operationMode = settings.savedOperationMode;
   // if not connect, going to stream mode
   if (WiFi.status() == WL_CONNECTED){
@@ -185,6 +179,11 @@ void setup() {
 void loop() {
   // В остальных режимах действия в loop() не требуются
 int currentMode = operationMode;
+int state = rtc_gpio_get_level(WAKEUP_PIN);
+if (state != lastState) {
+  Serial.printf("GPIO 37 изменил состояние на %s\n", state ? "HIGH" : "LOW");
+  lastState = state;
+}
 
   // Обработка MQTT-подключения и сообщений только в режиме интервальной отправки
   if (currentMode == 2 && settings.chanelMode == 2) {
@@ -194,9 +193,7 @@ int currentMode = operationMode;
     }
     mqttClient.loop();
   }
-
-ledIndicator(currentMode);
- delay(10);
+ delay(300);
 }
 
 // Функция инициализации Wi-Fi
@@ -225,7 +222,6 @@ void initWiFi() {
   // нужно изменить поведение селано случае отладки  
   if (WiFi.status() != WL_CONNECTED) {
     WiFi.softAP(ap_ssid, ap_password);
-    ledIndicator(0);
     Serial.println("\nТочка доступа запущена");
     Serial.print("IP адрес: ");
     Serial.println(WiFi.softAPIP());
@@ -271,8 +267,6 @@ void initTime() {
   }
 }
 
-
-
 // Функция запуска сервера потоковой трансляции
 void startCameraServer() {
   // Обработчик для корневого пути
@@ -309,7 +303,6 @@ void handle_jpg_stream(AsyncWebServerRequest *request) {
               return 0; // Пропускаем кадр
           }
         
-
         // Получаем новый кадр
         fb = esp_camera_fb_get();
         last_frame = now;
@@ -415,7 +408,6 @@ void captureAndSend() {
   Serial.println("Снимок обработан");
 }
 
-
 // Функция перехода в глубокий сон
 void enterDeepSleep(uint64_t sleepTimeS) {
   // Настраиваем пробуждение по таймеру
@@ -423,33 +415,18 @@ void enterDeepSleep(uint64_t sleepTimeS) {
 
   // Пробуждение по кнопке на G37
   //не работает в случае если значенин 0 то тут же просыпается
-  esp_sleep_enable_ext0_wakeup(WAKEUP_PIN, LOW); // Будем просыпаться при низком уровне сигнала
+  esp_sleep_enable_ext0_wakeup(WAKEUP_PIN, HIGH); // Будем просыпаться при низком уровне сигнала
 
   // Отключаем ADC на GPIO38
  // adc_power_off();
 
-  // Переинициализируем GPIO38 как RTC GPIO
-  rtc_gpio_deinit(WAKEUP_PIN);
-  rtc_gpio_init(WAKEUP_PIN);
-  rtc_gpio_set_direction(WAKEUP_PIN, RTC_GPIO_MODE_INPUT_ONLY);
-
-  rtc_gpio_pulldown_dis(WAKEUP_PIN);
-  rtc_gpio_pullup_dis(WAKEUP_PIN);
-
-  // Определяем битовую маску для GPIO38 (RTC_GPIO2)
-  uint64_t BUTTON_PIN_BITMASK = 1ULL << 2; // RTC_GPIO2 соответствует биту 2
-
-  // Настраиваем пробуждение по внешнему сигналу на GPIO38
-  // Устройство просыпается, когда GPIO38 переходит в LOW
-  //esp_sleep_enable_ext1_wakeup(BUTTON_PIN_BITMASK, ESP_EXT1_WAKEUP_ALL_LOW);
 
    int pinState = rtc_gpio_get_level(WAKEUP_PIN);
   Serial.printf("Текущее состояние WAKEUP_PIN (GPIO%u): %s\n", WAKEUP_PIN, pinState ? "HIGH" : "LOW");
-  //Serial.printf(" WAKEUP_PIN: GPIO%u (RTC_GPIO2), Битовая маска: 0x%016llX\n", WAKEUP_PIN, BUTTON_PIN_BITMASK);
-
+  
 
   Serial.println("Уходим в глубокий сон...");
-  delay(30000);
+  delay(3000);
   WiFi.disconnect(true); // Отключаем Wi-Fi полностью
   WiFi.mode(WIFI_OFF);     // Останавливаем Wi-Fi модуль
   // Отключаем питание камеры для экономии энергии
@@ -457,8 +434,7 @@ void enterDeepSleep(uint64_t sleepTimeS) {
 
   // Удерживаем состояние BAT_HOLD_PIN
   gpio_hold_en((gpio_num_t)POWER_HOLD_PIN);
- // gpio_deep_sleep_hold_en();
-
+ 
 
   // Переходим в глубокий сон
   esp_deep_sleep_start();

@@ -50,6 +50,8 @@ void handleRoot(AsyncWebServerRequest *request) {
   // Frame size
   html += "<label for='frameSize'>Frame Size:</label>";
   html += "<select name='frameSize' id='frameSize'>";
+  html += "<option value='12'" + String(settings.frameSize == 12 ? " selected" : "") + ">QXGA (2048x1536)</option>";
+  html += "<option value='11'" + String(settings.frameSize == 11 ? " selected" : "") + ">UXGA (1600x1200)</option>";
   html += "<option value='10'" + String(settings.frameSize == 10 ? " selected" : "") + ">SVGA (800x600)</option>";
   html += "<option value='9'" + String(settings.frameSize == 9 ? " selected" : "") + ">VGA (640x480)</option>";
   html += "<option value='8'" + String(settings.frameSize == 8 ? " selected" : "") + ">CIF (352x288)</option>";

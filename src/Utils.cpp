@@ -27,16 +27,24 @@ void ledIndicator(int mode) {
 }
 
 // Чтение напряжения батареи
-float readBatteryVoltage() {
-  uint16_t raw = analogRead(BAT_ADC_PIN);
-  float voltage = ((float)raw / 4095.0) * 3.3 / 0.661;
-  Serial.println("Напряжение батареи: " + String(voltage));
+float readBatteryVoltage(uint8_t samples = 5) {
+  uint32_t sum = 0;
+
+  for (uint8_t i = 0; i < samples; i++) {
+    sum += analogRead(BAT_ADC_PIN);
+    delay(5); // короткая задержка для стабильности
+  }
+
+  float avgRaw = sum / (float)samples;
+  float voltage = (avgRaw / 4095.0) * 3.3 / 0.661;
+
+  Serial.printf("Напряжение батареи: %.2f В (avg raw: %.0f)\n", voltage, avgRaw);
   return voltage;
 }
 
 String getFileNameWithBatteryLevel() {
   DateTime now = rtc.now();
-  float voltage = readBatteryVoltage();
+  float voltage = readBatteryVoltage(10);
 
   char buf[50];
   snprintf(buf, sizeof(buf), "%02d%02d%02d_%02d%02d_%.2fV.jpg",
