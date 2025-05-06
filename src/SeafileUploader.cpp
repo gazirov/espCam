@@ -1,5 +1,46 @@
-// SeafileUploader.cpp
 #include "SeafileUploader.h"
+
+struct UrlInfo {
+  String host;
+  String path;
+  bool useSSL;
+  uint16_t port;
+};
+
+UrlInfo parseUrl(const String& url) {
+  UrlInfo info;
+  info.useSSL = url.startsWith("https://");
+  info.port = info.useSSL ? 443 : 80;
+
+  String tempUrl = url;
+  tempUrl.replace("https://", "");
+  tempUrl.replace("http://", "");
+  tempUrl.trim();
+  int pathIndex = tempUrl.indexOf('/');
+  if (pathIndex > 0) {
+    info.host = tempUrl.substring(0, pathIndex);
+    info.path = tempUrl.substring(pathIndex);
+  } else {
+    info.host = tempUrl;
+    info.path = "/";
+  }
+
+  return info;
+}
+
+WiFiClient* createClient(bool useSSL, HTTPClient& http, const String& url) {
+  WiFiClientSecure* secureClient = new WiFiClientSecure();
+  WiFiClient* plainClient = new WiFiClient();
+
+  if (useSSL) {
+    secureClient->setInsecure(); // Отключаем проверку сертификатов
+    http.begin(*secureClient, url);
+    return secureClient;
+  } else {
+    http.begin(*plainClient, url);
+    return plainClient;
+  }
+}
 
 bool fetchSeafileToken() {
   if (settings.seafile_host == "" || settings.seafile_user == "" || settings.seafile_pass == "") {
@@ -7,39 +48,23 @@ bool fetchSeafileToken() {
     return false;
   }
 
-  String hostUrl = settings.seafile_host;
-  bool useSSL = hostUrl.startsWith("https://");
-  uint16_t port = useSSL ? 443 : 80;
-
-  String host = hostUrl;
-  host.replace("https://", "");
-  host.replace("http://", "");
-  int slashIndex = host.indexOf('/');
-  if (slashIndex > 0) host = host.substring(0, slashIndex);
+  UrlInfo hostInfo = parseUrl(settings.seafile_host);
 
   String path = "/api2/auth-token/";
   String postData = "username=" + settings.seafile_user + "&password=" + settings.seafile_pass;
 
-  WiFiClient *client;
-  WiFiClientSecure secureClient;
-  WiFiClient plainClient;
+  HTTPClient http;
+  WiFiClient* client = createClient(hostInfo.useSSL, http, settings.seafile_host + path);
 
-  if (useSSL) {
-    secureClient.setInsecure();
-    client = &secureClient;
-  } else {
-    client = &plainClient;
-  }
-
-  Serial.printf("[Seafile] Подключение к %s:%d\n", host.c_str(), port);
-  if (!client->connect(host.c_str(), port)) {
+  if (!client->connect(hostInfo.host.c_str(), hostInfo.port)) {
     Serial.println("Ошибка подключения к Seafile");
+    delete client;
     return false;
   }
 
   String request =
     "POST " + path + " HTTP/1.1\r\n" +
-    "Host: " + host + "\r\n" +
+    "Host: " + hostInfo.host + "\r\n" +
     "Content-Type: application/x-www-form-urlencoded\r\n" +
     "Content-Length: " + String(postData.length()) + "\r\n" +
     "Connection: close\r\n\r\n" +
@@ -54,6 +79,7 @@ bool fetchSeafileToken() {
 
   String response = client->readString();
   client->stop();
+  delete client;
 
   int start = response.indexOf(":\"") + 2;
   int end = response.indexOf("\"", start);
@@ -80,37 +106,22 @@ void sendToSeafile(camera_fb_t *fb, const String& fileName) {
     fetchSeafileToken();
   }
 
-  String hostUrl = settings.seafile_host;
-  bool useSSL = hostUrl.startsWith("https://");
-  uint16_t port = useSSL ? 443 : 80;
+  UrlInfo hostInfo = parseUrl(settings.seafile_host);
 
-  String host = hostUrl;
-  host.replace("https://", "");
-  host.replace("http://", "");
-  host.trim();
-  int slashIndex = host.indexOf('/');
-  if (slashIndex > 0) host = host.substring(0, slashIndex);
-
-  Serial.printf("[Seafile] Подключение к %s:%d (SSL: %s)\n", host.c_str(), port, useSSL ? "да" : "нет");
+  Serial.printf("[Seafile] Подключение к %s:%d (SSL: %s)\n", hostInfo.host.c_str(), hostInfo.port, hostInfo.useSSL ? "да" : "нет");
 
   String uploadLinkPath = "/api2/repos/" + settings.seafile_repo_id + "/upload-link/";
-  String uploadLinkUrl = hostUrl + uploadLinkPath;
+  String uploadLinkUrl = settings.seafile_host + uploadLinkPath;
 
   HTTPClient http;
-  if (useSSL) {
-    WiFiClientSecure sclient;
-    sclient.setInsecure();
-    http.begin(sclient, uploadLinkUrl);
-  } else {
-    WiFiClient cclient;
-    http.begin(cclient, uploadLinkUrl);
-  }
+  WiFiClient* client = createClient(hostInfo.useSSL, http, uploadLinkUrl);
 
   http.addHeader("Authorization", "Token " + String(settings.seafile_token));
   int code = http.GET();
   if (code != 200) {
     Serial.printf("[Seafile] Ошибка получения upload link: %d\n", code);
     http.end();
+    delete client;
     return;
   }
 
@@ -118,37 +129,15 @@ void sendToSeafile(camera_fb_t *fb, const String& fileName) {
   uploadUrl.replace("\"", "");
   http.end();
 
-  String uploadPath;
-  String uploadHost;
-  bool uploadSSL = uploadUrl.startsWith("https://");
-  uint16_t uploadPort = uploadSSL ? 443 : 80;
+  UrlInfo uploadInfo = parseUrl(uploadUrl);
 
-  uploadUrl.replace("https://", "");
-  uploadUrl.replace("http://", "");
-  int pathIndex = uploadUrl.indexOf('/');
-  if (pathIndex > 0) {
-    uploadHost = uploadUrl.substring(0, pathIndex);
-    uploadPath = uploadUrl.substring(pathIndex);
-  } else {
-    Serial.println("[Seafile] Неверный upload URL");
-    return;
-  }
+  Serial.printf("[Seafile] Отправка на %s:%d%s\n", uploadInfo.host.c_str(), uploadInfo.port, uploadInfo.path.c_str());
 
-  Serial.printf("[Seafile] Отправка на %s:%d%s\n", uploadHost.c_str(), uploadPort, uploadPath.c_str());
+  client = createClient(uploadInfo.useSSL, http, uploadUrl);
 
-  WiFiClient *client;
-  WiFiClientSecure secureClient;
-  WiFiClient plainClient;
-
-  if (uploadSSL) {
-    secureClient.setInsecure();
-    client = &secureClient;
-  } else {
-    client = &plainClient;
-  }
-
-  if (!client->connect(uploadHost.c_str(), uploadPort)) {
+  if (!client->connect(uploadInfo.host.c_str(), uploadInfo.port)) {
     Serial.println("[Seafile] Ошибка подключения к серверу загрузки");
+    delete client;
     return;
   }
 
@@ -164,8 +153,8 @@ void sendToSeafile(camera_fb_t *fb, const String& fileName) {
   size_t contentLength = bodyStart.length() + fb->len + bodyEnd.length();
 
   String header =
-    "POST " + uploadPath + " HTTP/1.1\r\n" +
-    "Host: " + uploadHost + "\r\n" +
+    "POST " + uploadInfo.path + " HTTP/1.1\r\n" +
+    "Host: " + uploadInfo.host + "\r\n" +
     "Authorization: Token " + String(settings.seafile_token) + "\r\n" +
     "Content-Type: multipart/form-data; boundary=" + boundary + "\r\n" +
     "Content-Length: " + String(contentLength) + "\r\n" +
@@ -197,4 +186,5 @@ void sendToSeafile(camera_fb_t *fb, const String& fileName) {
   Serial.println(response);
 
   client->stop();
+  delete client;
 }

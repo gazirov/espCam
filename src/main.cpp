@@ -426,7 +426,7 @@ void enterDeepSleep(uint64_t sleepTimeS) {
   
 
   Serial.println("Уходим в глубокий сон...");
-  delay(3000);
+  delay(1000);
   WiFi.disconnect(true); // Отключаем Wi-Fi полностью
   WiFi.mode(WIFI_OFF);     // Останавливаем Wi-Fi модуль
   // Отключаем питание камеры для экономии энергии
